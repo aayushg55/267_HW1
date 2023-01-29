@@ -238,7 +238,7 @@ void matmul_no_block(const lda, double *mat1, double *mat2, double* result) {
                     __m256d m2 = _mm256_loadu_pd(mat2 + lda * j + k);
                     sum = _mm256_fmadd_pd (m1, m2, sum); 
                 }
-                for (; k < lda; k++) {
+                for (; k < lda;  k++) {
                     sum_tail += mat1[lda * i + k] * mat2[lda * j + k];
                 }
                 _mm256_storeu_pd (sums, sum);
