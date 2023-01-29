@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.14)
 project(hw1 LANGUAGES C CXX)
 
+if (APPLE)
+  include_directories("/opt/homebrew/opt/openblas/include")
+endif (APPLE)
 find_package(BLAS REQUIRED)
 
 # Run the full set of tests
