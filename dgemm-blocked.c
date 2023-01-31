@@ -23,7 +23,7 @@ L3: 32MB
 const int KC = 256, MC = 96, MR = 12, NR = 4;
 
 /*-----------------------------------------------------------------*/
-void pack_b(int lda, int kc_act, double* B, double* packed_b) {
+void pack_b_default(int lda, int kc_act, double* B, double* packed_b) {
     for (int pan_ptr = 0; pan_ptr < lda; pan_ptr+=NR) {
         int nr_act = min(NR, lda-pan_ptr);
         for (int i = 0; i < kc_act; i++) {
@@ -81,7 +81,33 @@ void pack_b_unrolled(int lda, int kc_act, double* B, double* packed_b) {
     }
 }
 
-void pack_a(int lda, int mc_act, int kc_act, double* A, double* packed_a) {
+void pack_a_default(int lda, int mc_act, int kc_act, double* A, double* packed_a) {
+    // double* copy = packed_a;
+    for (int pan_ptr = 0; pan_ptr < mc_act; pan_ptr+=MR) {
+        int mr_act = min(MR, mc_act - pan_ptr);
+        for (int i = 0; i < kc_act; i++) {
+            for (int j = 0; j < mr_act; j++) {
+                *packed_a++ = A[pan_ptr + lda*i + j];
+            }
+            for (int j = mr_act; j < MR; j++) {
+                *packed_a++ = 0.0;
+            }
+        }
+    }
+    // packed_a = copy;
+    // printf("%s", "print packed a \n");
+    // for (int pan_ptr = 0; pan_ptr < mc_act; pan_ptr+=MR) {
+    //     for (int i = 0; i < MR; i++) {
+    //         for (int j = 0; j < kc_act; j++) {
+    //             printf("%f ", packed_a[pan_ptr*kc_act + i+j*MR]);
+    //         }
+    //         printf("%s", "\n");
+    //     }
+    // }
+    // printf("%s", "\n");
+}
+
+void pack_a_12xKC(int lda, int mc_act, int kc_act, double* A, double* packed_a) {
     // double* copy = packed_a;
 
     for (int pan_ptr = 0; pan_ptr < mc_act; pan_ptr+=MR) {
@@ -159,7 +185,33 @@ void pack_a(int lda, int mc_act, int kc_act, double* A, double* packed_a) {
     // printf("%s", "\n");
 }
 
-void pad_c(int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* C, double* micro_tile_c) {
+void pad_c_default(int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* C, double* micro_tile_c) {
+    int idx = 0;
+    for (int j = 0; j < nr_act; j++) {
+        for (int i = 0; i < mr_act; i++) {
+            micro_tile_c[idx++] = C[i+j*lda];
+        }
+        for (int i = mr_act; i < MR; i++) {
+            micro_tile_c[idx++] = 0.0;
+        }
+    }
+    for (int j = nr_act; j < NR; j++) {
+        for (int i = 0; i < MR; i++) {
+            micro_tile_c[idx++] = 0.0;
+        }
+    }
+
+    //print tile
+    // printf("%s", "padded c: \n");
+    // for (int i = 0; i < MR; i++) {
+    //     for (int j = 0; j < NR; j++) {
+    //         printf("%f ", micro_tile_c[i+j*MR]);
+    //     }
+    //     printf("\n");
+    // }
+}
+
+void pad_c_12x4(int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* C, double* micro_tile_c) {
     int idx = 0;
     if (mr_act == MR && nr_act == NR) {
         //vectorize full tiles
@@ -229,7 +281,6 @@ void pad_c(int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* C, d
             }
         }
     }
-
     //print tile
     // printf("%s", "padded c: \n");
     // for (int i = 0; i < MR; i++) {
@@ -475,7 +526,7 @@ void micro_kernel_12x4(int lda, int kc_act, int mc_act, int nr_act, int mr_act, 
 void block_panel_multiply(int lda, int kc_act, int mc_act, int nr_act, double* packed_a, double* packed_b, double* C, double* micro_tile_c) {
     for (int a_pan_ptr = 0; a_pan_ptr < mc_act; a_pan_ptr += MR) {
         int mr_act = min(MR, mc_act-a_pan_ptr);
-        pad_c(lda, kc_act, mc_act, nr_act, mr_act, C + a_pan_ptr, micro_tile_c);
+        pad_c_default(lda, kc_act, mc_act, nr_act, mr_act, C + a_pan_ptr, micro_tile_c);
         micro_kernel_12x4(lda, kc_act, mc_act, nr_act, mr_act, packed_a + a_pan_ptr*kc_act, packed_b, C + a_pan_ptr, micro_tile_c);
     }
 }
@@ -491,7 +542,7 @@ void outer_proudct(int lda, int kc_act, double* A, double* packed_b, double* C, 
     for (int block_ptr = 0; block_ptr < lda; block_ptr+=MC) {
         // pack A
         int mc_act = min(MC, lda - block_ptr);
-        pack_a(lda, mc_act, kc_act, A + block_ptr, packed_a);
+        pack_a_default(lda, mc_act, kc_act, A + block_ptr, packed_a);
         block_multi_panel_multiply(lda, kc_act, mc_act, packed_a, packed_b, C + block_ptr,micro_tile_c);
     }
 }
@@ -537,7 +588,9 @@ void naive(int n, double* A, double* B, double* C) {
         }
     }
 }
-// To test things
+// To test correctness
+// gcc -g -mavx -mfma -fsanitize=address matrix.c -o mat
+
 // int main(int argc, char *argv[]) {
 //     int lda = 651;
 //     double* A = (double*) malloc(lda*lda*sizeof(double));
@@ -553,10 +606,10 @@ void naive(int n, double* A, double* B, double* C) {
 //     square_dgemm(lda, A, B, C);
 //     int correct = 1;
 //     for (int i = 0; i <lda*lda; i++){
-//         printf("%f ", D[i]-C[i]);
+//         // printf("%f ", D[i]-C[i]);
 //         correct = correct & (D[i]-C[i] == 0.0);
 //     }
-//     printf("\n correct: %d \n", correct);
+//     printf("\n correct?: %d \n", correct);
 //     // print_matrix_tran(lda, C);
 //     // print_matrix_tran(lda, D);
 //     free(A);
