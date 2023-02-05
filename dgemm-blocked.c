@@ -7,6 +7,7 @@ const char* dgemm_desc = "Simple blocked dgemm.";
 #include <x86intrin.h>
 #endif
 #include <stdio.h>
+#include <string.h>
 /*
 Cache sizes:
 L1: 32KB
@@ -20,10 +21,10 @@ L3: 32MB
 
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 
-const int KC = 256, MC = 96, MR = 12, NR = 4;
-
+const int KC = 256, MR = 8, NR = 5;
+int MC;
 /*-----------------------------------------------------------------*/
-void pack_b_default(int lda, int kc_act, double* B, double* packed_b) {
+void pack_b_default(const int lda, int kc_act, double* B, double* packed_b) {
     for (int pan_ptr = 0; pan_ptr < lda; pan_ptr+=NR) {
         int nr_act = min(NR, lda-pan_ptr);
         for (int i = 0; i < kc_act; i++) {
@@ -36,7 +37,7 @@ void pack_b_default(int lda, int kc_act, double* B, double* packed_b) {
         }        
     }
 }
-void pack_b_unrolled(int lda, int kc_act, double* B, double* packed_b) {
+void pack_b_unrolled(const int lda, int kc_act, double* B, double* packed_b) {
     int unroll = 4;
     int nr_act;
     for (int pan_ptr = 0; pan_ptr < lda/unroll/NR*unroll*NR; pan_ptr+=unroll*NR) {
@@ -81,7 +82,7 @@ void pack_b_unrolled(int lda, int kc_act, double* B, double* packed_b) {
     }
 }
 
-void pack_a_default(int lda, int mc_act, int kc_act, double* A, double* packed_a) {
+void pack_a_default(const int lda, int mc_act, int kc_act, double* A, double* packed_a) {
     // double* copy = packed_a;
     for (int pan_ptr = 0; pan_ptr < mc_act; pan_ptr+=MR) {
         int mr_act = min(MR, mc_act - pan_ptr);
@@ -106,8 +107,7 @@ void pack_a_default(int lda, int mc_act, int kc_act, double* A, double* packed_a
     // }
     // printf("%s", "\n");
 }
-
-void pack_a_12xKC(int lda, int mc_act, int kc_act, double* A, double* packed_a) {
+void pack_a_8xKC(const int lda, int mc_act, int kc_act, double* A, double* packed_a) {
     // double* copy = packed_a;
 
     for (int pan_ptr = 0; pan_ptr < mc_act; pan_ptr+=MR) {
@@ -118,15 +118,72 @@ void pack_a_12xKC(int lda, int mc_act, int kc_act, double* A, double* packed_a) 
             for (; i < kc_act/unroll*unroll; i+=unroll) {
                 __m256d a_0_col0 = _mm256_loadu_pd(A+pan_ptr + lda*i);
                 __m256d a_1_col0 = _mm256_loadu_pd(A+pan_ptr + lda*i+4);
+                i++;
+                __m256d a_0_col1 = _mm256_loadu_pd(A+pan_ptr + lda*i);
+                __m256d a_1_col1 = _mm256_loadu_pd(A+pan_ptr + lda*i+4);
+                // i++;
+                // __m256d a_0_col2 = _mm256_loadu_pd(A+pan_ptr + lda*i);
+                // __m256d a_1_col2 = _mm256_loadu_pd(A+pan_ptr + lda*i+4);
+                // i++;
+                // __m256d a_0_col3 = _mm256_loadu_pd(A+pan_ptr + lda*i);
+                // __m256d a_1_col3 = _mm256_loadu_pd(A+pan_ptr + lda*i+4);
+                i-=unroll-1;
+
+                _mm256_store_pd(packed_a, a_0_col0);
+                _mm256_store_pd(packed_a+4, a_1_col0);
+
+                _mm256_store_pd(packed_a+MR, a_0_col1);
+                _mm256_store_pd(packed_a+MR+4, a_1_col1);
+
+                // _mm256_store_pd(packed_a+MR*2, a_0_col2);
+                // _mm256_store_pd(packed_a+MR*2+4, a_1_col2);
+
+                // _mm256_store_pd(packed_a+MR*3, a_0_col3);
+                // _mm256_store_pd(packed_a+MR*3+4, a_1_col3);
+
+                packed_a += MR*unroll;
+            }
+
+            for (; i < kc_act; i++) {
+                __m256d a_0_col0 = _mm256_loadu_pd(A+pan_ptr + lda*i);
+                __m256d a_1_col0 = _mm256_loadu_pd(A+pan_ptr + lda*i+4);
+                _mm256_store_pd(packed_a, a_0_col0);
+                _mm256_store_pd(packed_a+4, a_1_col0);
+                packed_a += MR;
+            }
+        } else {
+            for (int i = 0; i < kc_act; i++) {
+                for (int j = 0; j < mr_act; j++) {
+                    *packed_a++ = A[pan_ptr + lda*i + j];
+                }
+                for (int j = mr_act; j < MR; j++) {
+                    *packed_a++ = 0.0;
+                }
+            }
+        }
+    }
+
+}
+void pack_a_12xKC(const int lda, int mc_act, int kc_act, double* A, double* packed_a) {
+    // double* copy = packed_a;
+
+    for (int pan_ptr = 0; pan_ptr < mc_act; pan_ptr+=MR) {
+        int mr_act = min(MR, mc_act - pan_ptr);
+        if (mr_act == MR) {
+            int unroll = 3;
+            int i = 0;
+            for (; i < kc_act/unroll*unroll; i+=unroll) {
+                __m256d a_0_col0 = _mm256_loadu_pd(A+pan_ptr + lda*i);
+                __m256d a_1_col0 = _mm256_loadu_pd(A+pan_ptr + lda*i+4);
                 __m256d a_2_col0 = _mm256_loadu_pd(A+pan_ptr + lda*i+8);
                 i++;
                 __m256d a_0_col1 = _mm256_loadu_pd(A+pan_ptr + lda*i);
                 __m256d a_1_col1 = _mm256_loadu_pd(A+pan_ptr + lda*i+4);
                 __m256d a_2_col1 = _mm256_loadu_pd(A+pan_ptr + lda*i+8); 
-                // i++;
-                // __m256d a_0_col2 = _mm256_loadu_pd(A+pan_ptr + lda*i);
-                // __m256d a_1_col2 = _mm256_loadu_pd(A+pan_ptr + lda*i+4);
-                // __m256d a_2_col2 = _mm256_loadu_pd(A+pan_ptr + lda*i+8); 
+                i++;
+                __m256d a_0_col2 = _mm256_loadu_pd(A+pan_ptr + lda*i);
+                __m256d a_1_col2 = _mm256_loadu_pd(A+pan_ptr + lda*i+4);
+                __m256d a_2_col2 = _mm256_loadu_pd(A+pan_ptr + lda*i+8); 
                 // i++;
                 // __m256d a_0_col3 = _mm256_loadu_pd(A+pan_ptr + lda*i);
                 // __m256d a_1_col3 = _mm256_loadu_pd(A+pan_ptr + lda*i+4);
@@ -141,9 +198,9 @@ void pack_a_12xKC(int lda, int mc_act, int kc_act, double* A, double* packed_a) 
                 _mm256_store_pd(packed_a+MR+4, a_1_col1);
                 _mm256_store_pd(packed_a+MR+8, a_2_col1);  
 
-                // _mm256_store_pd(packed_a+MR*2, a_0_col2);
-                // _mm256_store_pd(packed_a+MR*2+4, a_1_col2);
-                // _mm256_store_pd(packed_a+MR*2+8, a_2_col2);  
+                _mm256_store_pd(packed_a+MR*2, a_0_col2);
+                _mm256_store_pd(packed_a+MR*2+4, a_1_col2);
+                _mm256_store_pd(packed_a+MR*2+8, a_2_col2);  
 
                 // _mm256_store_pd(packed_a+MR*3, a_0_col3);
                 // _mm256_store_pd(packed_a+MR*3+4, a_1_col3);
@@ -185,7 +242,7 @@ void pack_a_12xKC(int lda, int mc_act, int kc_act, double* A, double* packed_a) 
     // printf("%s", "\n");
 }
 
-void pad_c_default(int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* C, double* micro_tile_c) {
+void pad_c_default(const int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* C, double* micro_tile_c) {
     int idx = 0;
     for (int j = 0; j < nr_act; j++) {
         for (int i = 0; i < mr_act; i++) {
@@ -211,7 +268,7 @@ void pad_c_default(int lda, int kc_act, int mc_act, int nr_act, int mr_act, doub
     // }
 }
 
-void pad_c_12x4(int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* C, double* micro_tile_c) {
+void pad_c_12x4(const int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* C, double* micro_tile_c) {
     int idx = 0;
     if (mr_act == MR && nr_act == NR) {
         //vectorize full tiles
@@ -291,7 +348,7 @@ void pad_c_12x4(int lda, int kc_act, int mc_act, int nr_act, int mr_act, double*
     // }
 }
 
-void micro_kernel_4x4(int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* pan_a, double* pan_b, double* C, double* micro_tile_c) {
+void micro_kernel_4x4(const int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* pan_a, double* pan_b, double* C, double* micro_tile_c) {
     //4x4 micro-kernel
 
     //Load from C (padded to be MRxNR into micro-tile)
@@ -333,7 +390,7 @@ void micro_kernel_4x4(int lda, int kc_act, int mc_act, int nr_act, int mr_act, d
         }
     }
 }
-void micro_kernel_8x4(int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* pan_a, double* pan_b, double* C, double* micro_tile_c) {
+void micro_kernel_8x4(const int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* pan_a, double* pan_b, double* C, double* micro_tile_c) {
     //4x4 micro-kernel
     // can not pack c and b in NR direction
 
@@ -388,7 +445,7 @@ void micro_kernel_8x4(int lda, int kc_act, int mc_act, int nr_act, int mr_act, d
         }
     }
 }
-void micro_kernel_12x4(int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* pan_a, double* pan_b, double* C, double* micro_tile_c) {
+void micro_kernel_12x4(const int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* pan_a, double* pan_b, double* C, double* micro_tile_c) {
     //4x4 micro-kernel
     // can not pack c and b in NR direction
 
@@ -523,34 +580,622 @@ void micro_kernel_12x4(int lda, int kc_act, int mc_act, int nr_act, int mr_act, 
     }
 }
 
-void block_panel_multiply(int lda, int kc_act, int mc_act, int nr_act, double* packed_a, double* packed_b, double* C, double* micro_tile_c) {
-    for (int a_pan_ptr = 0; a_pan_ptr < mc_act; a_pan_ptr += MR) {
-        int mr_act = min(MR, mc_act-a_pan_ptr);
-        pad_c_default(lda, kc_act, mc_act, nr_act, mr_act, C + a_pan_ptr, micro_tile_c);
-        micro_kernel_12x4(lda, kc_act, mc_act, nr_act, mr_act, packed_a + a_pan_ptr*kc_act, packed_b, C + a_pan_ptr, micro_tile_c);
+void micro_kernel_4x4_no_packing(const int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* pan_a, double* pan_b, double* C, double* micro_tile_c) {
+    //4x4 micro-kernel
+
+    //Load from C (padded to be MRxNR into micro-tile)
+    __m256d c_col0 = _mm256_set1_pd(0);
+    __m256d c_col1 = _mm256_set1_pd(0);
+    __m256d c_col2 = _mm256_set1_pd(0);
+    __m256d c_col3 = _mm256_set1_pd(0);
+
+    // Panels of A,B padded so they are MRxkc_act kc_actxNR respectively
+    for (int i = 0; i < kc_act; i+=1) {
+        //Compute a 4x1 x 1x4 outer-product by loading from A and broadcasting the value of B
+        __m256d a_col0 = _mm256_load_pd(pan_a);
+
+        // printf("b values: %f %f %f %f \n", *(pan_b), *(pan_b+1), *(pan_b+2), *(pan_b+3));
+        __m256d b_0 = _mm256_broadcast_sd(pan_b);
+        __m256d b_1 = _mm256_broadcast_sd(pan_b+1);
+        __m256d b_2 = _mm256_broadcast_sd(pan_b+2);
+        __m256d b_3 = _mm256_broadcast_sd(pan_b+3);
+
+        c_col0 = _mm256_fmadd_pd(a_col0, b_0, c_col0);
+        c_col1 = _mm256_fmadd_pd(a_col0, b_1, c_col1);
+        c_col2 = _mm256_fmadd_pd(a_col0, b_2, c_col2);
+        c_col3 = _mm256_fmadd_pd(a_col0, b_3, c_col3);
+
+        pan_b += NR;
+        pan_a += MR;
+    }
+
+    //Store first into microtile
+    _mm256_store_pd(micro_tile_c, c_col0);
+    _mm256_store_pd(micro_tile_c+4, c_col1);
+    _mm256_store_pd(micro_tile_c+8, c_col2);
+    _mm256_store_pd(micro_tile_c+12, c_col3);
+
+    //Unpack microtile into C, keeping actual size of C in mind
+    for (int j = 0; j < nr_act; j++) {
+        for (int i = 0; i < mr_act; i++) {
+            C[i+j*lda] += micro_tile_c[i+j*MR];
+        }
+    }
+}
+void micro_kernel_8x4_no_packing(const int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* pan_a, double* pan_b, double* C, double* micro_tile_c) {
+    //4x4 micro-kernel
+    // can not pack c and b in NR direction
+
+    //Load from C (padded to be MRxNR into micro-tile)
+    __m256d c_0_col0 = _mm256_set1_pd(0);
+    __m256d c_1_col0 = _mm256_set1_pd(0);
+    __m256d c_0_col1 = _mm256_set1_pd(0);
+    __m256d c_1_col1 = _mm256_set1_pd(0);
+
+    __m256d c_0_col2 = _mm256_set1_pd(0);
+    __m256d c_1_col2 = _mm256_set1_pd(0);
+    __m256d c_0_col3 = _mm256_set1_pd(0);
+    __m256d c_1_col3 = _mm256_set1_pd(0);
+    // Panels of A,B padded so they are MRxkc_act kc_actxNR respectively
+    for (int i = 0; i < kc_act; i+=1) {
+        //Compute a 12x1 x 1x12 outer-product by loading from A and broadcasting the value of B
+        __m256d a_0_col0 = _mm256_load_pd(pan_a);
+        __m256d a_1_col0 = _mm256_load_pd(pan_a+4);
+
+        __m256d b_0 = _mm256_broadcast_sd(pan_b);
+        __m256d b_1 = _mm256_broadcast_sd(pan_b+1);
+        __m256d b_2 = _mm256_broadcast_sd(pan_b+2);
+        __m256d b_3 = _mm256_broadcast_sd(pan_b+3);
+
+        c_0_col0 = _mm256_fmadd_pd(a_0_col0, b_0, c_0_col0);
+        c_1_col0 = _mm256_fmadd_pd(a_1_col0, b_0, c_1_col0);
+        c_0_col1 = _mm256_fmadd_pd(a_0_col0, b_1, c_0_col1);
+        c_1_col1 = _mm256_fmadd_pd(a_1_col0, b_1, c_1_col1);
+        c_0_col2 = _mm256_fmadd_pd(a_0_col0, b_2, c_0_col2);
+        c_1_col2 = _mm256_fmadd_pd(a_1_col0, b_2, c_1_col2);
+        c_0_col3 = _mm256_fmadd_pd(a_0_col0, b_3, c_0_col3);
+        c_1_col3 = _mm256_fmadd_pd(a_1_col0, b_3, c_1_col3);
+
+        pan_b += NR;
+        pan_a += MR;
+    }
+
+    //Store first into microtile
+    _mm256_store_pd(micro_tile_c, c_0_col0);
+    _mm256_store_pd(micro_tile_c+4, c_1_col0);
+    _mm256_store_pd(micro_tile_c+8, c_0_col1);
+    _mm256_store_pd(micro_tile_c+12, c_1_col1);
+
+    _mm256_store_pd(micro_tile_c+16, c_0_col2);
+    _mm256_store_pd(micro_tile_c+4+16, c_1_col2);
+    _mm256_store_pd(micro_tile_c+8+16, c_0_col3);
+    _mm256_store_pd(micro_tile_c+12+16, c_1_col3);
+    //Unpack microtile into C, keeping actual size of C in mind
+    for (int j = 0; j < nr_act; j++) {
+        for (int i = 0; i < mr_act; i++) {
+            C[i+j*lda] += micro_tile_c[i+j*MR];
+        }
+    }
+}
+void micro_kernel_8x5_no_packing(const int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* pan_a, double* pan_b, double* C, double* micro_tile_c) {
+    //4x4 micro-kernel
+    // can not pack c and b in NR direction
+
+    //Load from C (padded to be MRxNR into micro-tile)
+    __m256d c_0_col0 = _mm256_set1_pd(0);
+    __m256d c_1_col0 = _mm256_set1_pd(0);
+    __m256d c_0_col1 = _mm256_set1_pd(0);
+    __m256d c_1_col1 = _mm256_set1_pd(0);
+
+    __m256d c_0_col2 = _mm256_set1_pd(0);
+    __m256d c_1_col2 = _mm256_set1_pd(0);
+    __m256d c_0_col3 = _mm256_set1_pd(0);
+    __m256d c_1_col3 = _mm256_set1_pd(0);
+
+    __m256d c_0_col4 = _mm256_set1_pd(0);
+    __m256d c_1_col4 = _mm256_set1_pd(0);
+    // __m256d c_0_col5 = _mm256_set1_pd(0);
+    // __m256d c_1_col5 = _mm256_set1_pd(0);
+    // Panels of A,B padded so they are MRxkc_act kc_actxNR respectively
+    int unroll = 1;
+    __m256d a_0_col0, a_1_col0;
+    __m256d b_0, b_1, b_2, b_3, b_4;
+    for (int i = 0; i < kc_act/unroll*unroll; i+=unroll) {
+        //Compute a 4x1 x 1x4 outer-product by loading from A and broadcasting the value of B
+        a_0_col0 = _mm256_load_pd(pan_a);
+        a_1_col0 = _mm256_load_pd(pan_a+4);
+
+        b_0 = _mm256_broadcast_sd(pan_b);
+        b_1 = _mm256_broadcast_sd(pan_b+1);
+        b_2 = _mm256_broadcast_sd(pan_b+2);
+        b_3 = _mm256_broadcast_sd(pan_b+3);
+        b_4 = _mm256_broadcast_sd(pan_b+4);
+        // b_5 = _mm256_broadcast_sd(pan_b+5);
+
+        c_0_col0 = _mm256_fmadd_pd(a_0_col0, b_0, c_0_col0);
+        c_1_col0 = _mm256_fmadd_pd(a_1_col0, b_0, c_1_col0);
+
+        c_0_col1 = _mm256_fmadd_pd(a_0_col0, b_1, c_0_col1);
+        c_1_col1 = _mm256_fmadd_pd(a_1_col0, b_1, c_1_col1);
+
+        c_0_col2 = _mm256_fmadd_pd(a_0_col0, b_2, c_0_col2);
+        c_1_col2 = _mm256_fmadd_pd(a_1_col0, b_2, c_1_col2);
+
+        c_0_col3 = _mm256_fmadd_pd(a_0_col0, b_3, c_0_col3);
+        c_1_col3 = _mm256_fmadd_pd(a_1_col0, b_3, c_1_col3);
+
+        c_0_col4 = _mm256_fmadd_pd(a_0_col0, b_4, c_0_col4);
+        c_1_col4 = _mm256_fmadd_pd(a_1_col0, b_4, c_1_col4);
+        
+        // c_0_col5 = _mm256_fmadd_pd(a_0_col0, b_5, c_0_col5);
+        // c_1_col5= _mm256_fmadd_pd(a_1_col0, b_5, c_1_col5);    
+        pan_b += NR;
+        pan_a += MR;
+        /*-------------------------------------------------------------*/
+    }
+
+    //Store first into microtile
+    _mm256_store_pd(micro_tile_c, c_0_col0);
+    _mm256_store_pd(micro_tile_c+4, c_1_col0);
+
+    _mm256_store_pd(micro_tile_c+MR, c_0_col1);
+    _mm256_store_pd(micro_tile_c+MR+4, c_1_col1);
+
+    _mm256_store_pd(micro_tile_c+MR*2, c_0_col2);
+    _mm256_store_pd(micro_tile_c+MR*2+4, c_1_col2);
+
+    _mm256_store_pd(micro_tile_c+MR*3, c_0_col3);
+    _mm256_store_pd(micro_tile_c+MR*3+4, c_1_col3);
+
+    _mm256_store_pd(micro_tile_c+MR*4, c_0_col4);
+    _mm256_store_pd(micro_tile_c+MR*4+4, c_1_col4);
+
+    // _mm256_store_pd(micro_tile_c+MR*5, c_0_col5);
+    // _mm256_store_pd(micro_tile_c+MR*5+4, c_1_col5);
+
+    //Unpack microtile into C, keeping actual size of C in mind
+    for (int j = 0; j < nr_act; j++) {
+        for (int i = 0; i < mr_act; i++) {
+            C[i+j*lda] += micro_tile_c[i+j*MR];
+        }
+    }
+}
+void micro_kernel_8x5_no_packing_unrolled(const int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* pan_a, double* pan_b, double* C, double* micro_tile_c) {
+    //4x4 micro-kernel
+    // can not pack c and b in NR direction
+
+    //Load from C (padded to be MRxNR into micro-tile)
+    __m256d c_0_col0 = _mm256_set1_pd(0);
+    __m256d c_1_col0 = _mm256_set1_pd(0);
+    __m256d c_0_col1 = _mm256_set1_pd(0);
+    __m256d c_1_col1 = _mm256_set1_pd(0);
+
+    __m256d c_0_col2 = _mm256_set1_pd(0);
+    __m256d c_1_col2 = _mm256_set1_pd(0);
+    __m256d c_0_col3 = _mm256_set1_pd(0);
+    __m256d c_1_col3 = _mm256_set1_pd(0);
+
+    __m256d c_0_col4 = _mm256_set1_pd(0);
+    __m256d c_1_col4 = _mm256_set1_pd(0);
+
+    // Panels of A,B padded so they are MRxkc_act kc_actxNR respectively
+    int unroll = 4;
+    __m256d a_0_col0, a_1_col0;
+    __m256d b_0, b_1, b_2, b_3, b_4;
+    for (int i = 0; i < kc_act/unroll*unroll; i+=unroll) {
+        //Compute a 4x1 x 1x4 outer-product by loading from A and broadcasting the value of B
+        a_0_col0 = _mm256_load_pd(pan_a);
+        a_1_col0 = _mm256_load_pd(pan_a+4);
+
+        b_0 = _mm256_broadcast_sd(pan_b);
+        b_1 = _mm256_broadcast_sd(pan_b+1);
+        b_2 = _mm256_broadcast_sd(pan_b+2);
+        b_3 = _mm256_broadcast_sd(pan_b+3);
+        b_4 = _mm256_broadcast_sd(pan_b+4);
+
+        c_0_col0 = _mm256_fmadd_pd(a_0_col0, b_0, c_0_col0);
+        c_1_col0 = _mm256_fmadd_pd(a_1_col0, b_0, c_1_col0);
+
+        c_0_col1 = _mm256_fmadd_pd(a_0_col0, b_1, c_0_col1);
+        c_1_col1 = _mm256_fmadd_pd(a_1_col0, b_1, c_1_col1);
+
+        c_0_col2 = _mm256_fmadd_pd(a_0_col0, b_2, c_0_col2);
+        c_1_col2 = _mm256_fmadd_pd(a_1_col0, b_2, c_1_col2);
+
+        c_0_col3 = _mm256_fmadd_pd(a_0_col0, b_3, c_0_col3);
+        c_1_col3 = _mm256_fmadd_pd(a_1_col0, b_3, c_1_col3);
+
+        c_0_col4 = _mm256_fmadd_pd(a_0_col0, b_4, c_0_col4);
+        c_1_col4 = _mm256_fmadd_pd(a_1_col0, b_4, c_1_col4);
+        
+        pan_b += NR;
+        pan_a += MR;
+        /*-------------------------------------------------------------*/
+        a_0_col0 = _mm256_load_pd(pan_a);
+        a_1_col0 = _mm256_load_pd(pan_a+4);
+
+        b_0 = _mm256_broadcast_sd(pan_b);
+        b_1 = _mm256_broadcast_sd(pan_b+1);
+        b_2 = _mm256_broadcast_sd(pan_b+2);
+        b_3 = _mm256_broadcast_sd(pan_b+3);
+        b_4 = _mm256_broadcast_sd(pan_b+4);
+
+        c_0_col0 = _mm256_fmadd_pd(a_0_col0, b_0, c_0_col0);
+        c_1_col0 = _mm256_fmadd_pd(a_1_col0, b_0, c_1_col0);
+
+        c_0_col1 = _mm256_fmadd_pd(a_0_col0, b_1, c_0_col1);
+        c_1_col1 = _mm256_fmadd_pd(a_1_col0, b_1, c_1_col1);
+
+        c_0_col2 = _mm256_fmadd_pd(a_0_col0, b_2, c_0_col2);
+        c_1_col2 = _mm256_fmadd_pd(a_1_col0, b_2, c_1_col2);
+
+        c_0_col3 = _mm256_fmadd_pd(a_0_col0, b_3, c_0_col3);
+        c_1_col3 = _mm256_fmadd_pd(a_1_col0, b_3, c_1_col3);
+
+        c_0_col4 = _mm256_fmadd_pd(a_0_col0, b_4, c_0_col4);
+        c_1_col4 = _mm256_fmadd_pd(a_1_col0, b_4, c_1_col4);
+        
+        pan_b += NR;
+        pan_a += MR;
+        /*-------------------------------------------------------------*/
+        a_0_col0 = _mm256_load_pd(pan_a);
+        a_1_col0 = _mm256_load_pd(pan_a+4);
+
+        b_0 = _mm256_broadcast_sd(pan_b);
+        b_1 = _mm256_broadcast_sd(pan_b+1);
+        b_2 = _mm256_broadcast_sd(pan_b+2);
+        b_3 = _mm256_broadcast_sd(pan_b+3);
+        b_4 = _mm256_broadcast_sd(pan_b+4);
+
+        c_0_col0 = _mm256_fmadd_pd(a_0_col0, b_0, c_0_col0);
+        c_1_col0 = _mm256_fmadd_pd(a_1_col0, b_0, c_1_col0);
+
+        c_0_col1 = _mm256_fmadd_pd(a_0_col0, b_1, c_0_col1);
+        c_1_col1 = _mm256_fmadd_pd(a_1_col0, b_1, c_1_col1);
+
+        c_0_col2 = _mm256_fmadd_pd(a_0_col0, b_2, c_0_col2);
+        c_1_col2 = _mm256_fmadd_pd(a_1_col0, b_2, c_1_col2);
+
+        c_0_col3 = _mm256_fmadd_pd(a_0_col0, b_3, c_0_col3);
+        c_1_col3 = _mm256_fmadd_pd(a_1_col0, b_3, c_1_col3);
+
+        c_0_col4 = _mm256_fmadd_pd(a_0_col0, b_4, c_0_col4);
+        c_1_col4 = _mm256_fmadd_pd(a_1_col0, b_4, c_1_col4);
+        
+        pan_b += NR;
+        pan_a += MR;
+        /*-------------------------------------------------------------*/
+        a_0_col0 = _mm256_load_pd(pan_a);
+        a_1_col0 = _mm256_load_pd(pan_a+4);
+
+        b_0 = _mm256_broadcast_sd(pan_b);
+        b_1 = _mm256_broadcast_sd(pan_b+1);
+        b_2 = _mm256_broadcast_sd(pan_b+2);
+        b_3 = _mm256_broadcast_sd(pan_b+3);
+        b_4 = _mm256_broadcast_sd(pan_b+4);
+
+        c_0_col0 = _mm256_fmadd_pd(a_0_col0, b_0, c_0_col0);
+        c_1_col0 = _mm256_fmadd_pd(a_1_col0, b_0, c_1_col0);
+
+        c_0_col1 = _mm256_fmadd_pd(a_0_col0, b_1, c_0_col1);
+        c_1_col1 = _mm256_fmadd_pd(a_1_col0, b_1, c_1_col1);
+
+        c_0_col2 = _mm256_fmadd_pd(a_0_col0, b_2, c_0_col2);
+        c_1_col2 = _mm256_fmadd_pd(a_1_col0, b_2, c_1_col2);
+
+        c_0_col3 = _mm256_fmadd_pd(a_0_col0, b_3, c_0_col3);
+        c_1_col3 = _mm256_fmadd_pd(a_1_col0, b_3, c_1_col3);
+
+        c_0_col4 = _mm256_fmadd_pd(a_0_col0, b_4, c_0_col4);
+        c_1_col4 = _mm256_fmadd_pd(a_1_col0, b_4, c_1_col4);
+        pan_b += NR;
+        pan_a += MR;
+        /*------------------------------------------------*/
+    }
+    for (int i = kc_act/unroll*unroll; i < kc_act; i++) {
+        a_0_col0 = _mm256_load_pd(pan_a);
+        a_1_col0 = _mm256_load_pd(pan_a+4);
+
+        b_0 = _mm256_broadcast_sd(pan_b);
+        b_1 = _mm256_broadcast_sd(pan_b+1);
+        b_2 = _mm256_broadcast_sd(pan_b+2);
+        b_3 = _mm256_broadcast_sd(pan_b+3);
+        b_4 = _mm256_broadcast_sd(pan_b+4);
+
+        c_0_col0 = _mm256_fmadd_pd(a_0_col0, b_0, c_0_col0);
+        c_1_col0 = _mm256_fmadd_pd(a_1_col0, b_0, c_1_col0);
+
+        c_0_col1 = _mm256_fmadd_pd(a_0_col0, b_1, c_0_col1);
+        c_1_col1 = _mm256_fmadd_pd(a_1_col0, b_1, c_1_col1);
+
+        c_0_col2 = _mm256_fmadd_pd(a_0_col0, b_2, c_0_col2);
+        c_1_col2 = _mm256_fmadd_pd(a_1_col0, b_2, c_1_col2);
+
+        c_0_col3 = _mm256_fmadd_pd(a_0_col0, b_3, c_0_col3);
+        c_1_col3 = _mm256_fmadd_pd(a_1_col0, b_3, c_1_col3);
+
+        c_0_col4 = _mm256_fmadd_pd(a_0_col0, b_4, c_0_col4);
+        c_1_col4 = _mm256_fmadd_pd(a_1_col0, b_4, c_1_col4);
+        
+        pan_b += NR;
+        pan_a += MR;
+    }
+
+    //Store first into microtile
+    _mm256_store_pd(micro_tile_c, c_0_col0);
+    _mm256_store_pd(micro_tile_c+4, c_1_col0);
+
+    _mm256_store_pd(micro_tile_c+MR, c_0_col1);
+    _mm256_store_pd(micro_tile_c+MR+4, c_1_col1);
+
+    _mm256_store_pd(micro_tile_c+MR*2, c_0_col2);
+    _mm256_store_pd(micro_tile_c+MR*2+4, c_1_col2);
+
+    _mm256_store_pd(micro_tile_c+MR*3, c_0_col3);
+    _mm256_store_pd(micro_tile_c+MR*3+4, c_1_col3);
+
+    _mm256_store_pd(micro_tile_c+MR*4, c_0_col4);
+    _mm256_store_pd(micro_tile_c+MR*4+4, c_1_col4);
+
+
+    //Unpack microtile into C, keeping actual size of C in mind
+    for (int j = 0; j < nr_act; j++) {
+        for (int i = 0; i < mr_act; i++) {
+            C[i+j*lda] += micro_tile_c[i+j*MR];
+        }
     }
 }
 
-void block_multi_panel_multiply(int lda, int kc_act, int mc_act, double* packed_a, double* packed_b, double* C, double* micro_tile_c) {
+
+void micro_kernel_8x6_no_packing(const int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* pan_a, double* pan_b, double* C, double* micro_tile_c) {
+    //4x4 micro-kernel
+    // can not pack c and b in NR direction
+
+    //Load from C (padded to be MRxNR into micro-tile)
+    __m256d c_0_col0 = _mm256_set1_pd(0);
+    __m256d c_1_col0 = _mm256_set1_pd(0);
+    __m256d c_0_col1 = _mm256_set1_pd(0);
+    __m256d c_1_col1 = _mm256_set1_pd(0);
+
+    __m256d c_0_col2 = _mm256_set1_pd(0);
+    __m256d c_1_col2 = _mm256_set1_pd(0);
+    __m256d c_0_col3 = _mm256_set1_pd(0);
+    __m256d c_1_col3 = _mm256_set1_pd(0);
+
+    __m256d c_0_col4 = _mm256_set1_pd(0);
+    __m256d c_1_col4 = _mm256_set1_pd(0);
+    __m256d c_0_col5 = _mm256_set1_pd(0);
+    __m256d c_1_col5 = _mm256_set1_pd(0);
+    // Panels of A,B padded so they are MRxkc_act kc_actxNR respectively
+    int unroll = 1;
+    __m256d a_0_col0, a_1_col0;
+    __m256d b_0, b_1, b_2, b_3, b_4, b_5;
+    for (int i = 0; i < kc_act/unroll*unroll; i+=unroll) {
+        //Compute a 4x1 x 1x4 outer-product by loading from A and broadcasting the value of B
+        a_0_col0 = _mm256_load_pd(pan_a);
+        a_1_col0 = _mm256_load_pd(pan_a+4);
+
+        b_0 = _mm256_broadcast_sd(pan_b);
+        b_1 = _mm256_broadcast_sd(pan_b+1);
+        b_2 = _mm256_broadcast_sd(pan_b+2);
+        b_3 = _mm256_broadcast_sd(pan_b+3);
+        b_4 = _mm256_broadcast_sd(pan_b+4);
+        b_5 = _mm256_broadcast_sd(pan_b+5);
+
+        c_0_col0 = _mm256_fmadd_pd(a_0_col0, b_0, c_0_col0);
+        c_1_col0 = _mm256_fmadd_pd(a_1_col0, b_0, c_1_col0);
+
+        c_0_col1 = _mm256_fmadd_pd(a_0_col0, b_1, c_0_col1);
+        c_1_col1 = _mm256_fmadd_pd(a_1_col0, b_1, c_1_col1);
+
+        c_0_col2 = _mm256_fmadd_pd(a_0_col0, b_2, c_0_col2);
+        c_1_col2 = _mm256_fmadd_pd(a_1_col0, b_2, c_1_col2);
+
+        c_0_col3 = _mm256_fmadd_pd(a_0_col0, b_3, c_0_col3);
+        c_1_col3 = _mm256_fmadd_pd(a_1_col0, b_3, c_1_col3);
+
+        c_0_col4 = _mm256_fmadd_pd(a_0_col0, b_4, c_0_col4);
+        c_1_col4 = _mm256_fmadd_pd(a_1_col0, b_4, c_1_col4);
+        
+        c_0_col5 = _mm256_fmadd_pd(a_0_col0, b_5, c_0_col5);
+        c_1_col5= _mm256_fmadd_pd(a_1_col0, b_5, c_1_col5);    
+        pan_b += NR;
+        pan_a += MR;
+        /*-------------------------------------------------------------*/
+    }
+
+    //Store first into microtile
+    _mm256_store_pd(micro_tile_c, c_0_col0);
+    _mm256_store_pd(micro_tile_c+4, c_1_col0);
+
+    _mm256_store_pd(micro_tile_c+MR, c_0_col1);
+    _mm256_store_pd(micro_tile_c+MR+4, c_1_col1);
+
+    _mm256_store_pd(micro_tile_c+MR*2, c_0_col2);
+    _mm256_store_pd(micro_tile_c+MR*2+4, c_1_col2);
+
+    _mm256_store_pd(micro_tile_c+MR*3, c_0_col3);
+    _mm256_store_pd(micro_tile_c+MR*3+4, c_1_col3);
+
+    _mm256_store_pd(micro_tile_c+MR*4, c_0_col4);
+    _mm256_store_pd(micro_tile_c+MR*4+4, c_1_col4);
+
+    _mm256_store_pd(micro_tile_c+MR*5, c_0_col5);
+    _mm256_store_pd(micro_tile_c+MR*5+4, c_1_col5);
+
+    //Unpack microtile into C, keeping actual size of C in mind
+    for (int j = 0; j < nr_act; j++) {
+        for (int i = 0; i < mr_act; i++) {
+            C[i+j*lda] += micro_tile_c[i+j*MR];
+        }
+    }
+}
+void micro_kernel_12x4_no_packing(const int lda, int kc_act, int mc_act, int nr_act, int mr_act, double* pan_a, double* pan_b, double* C, double* micro_tile_c) {
+    //4x4 micro-kernel
+    // can not pack c and b in NR direction
+
+    //Load from C (padded to be MRxNR into micro-tile)
+    __m256d c_0_col0 = _mm256_set1_pd(0);
+    __m256d c_1_col0 = _mm256_set1_pd(0);
+    __m256d c_2_col0 = _mm256_set1_pd(0);
+
+    __m256d c_0_col1 = _mm256_set1_pd(0);
+    __m256d c_1_col1 = _mm256_set1_pd(0);
+    __m256d c_2_col1 = _mm256_set1_pd(0);
+
+    __m256d c_0_col2 = _mm256_set1_pd(0);
+    __m256d c_1_col2 = _mm256_set1_pd(0);
+    __m256d c_2_col2 = _mm256_set1_pd(0);
+
+    __m256d c_0_col3 = _mm256_set1_pd(0);
+    __m256d c_1_col3 = _mm256_set1_pd(0);
+    __m256d c_2_col3 = _mm256_set1_pd(0);
+    // Panels of A,B padded so they are MRxkc_act kc_actxNR respectively
+    int unroll = 2;
+    __m256d a_0_col0, a_1_col0, a_2_col0;
+    __m256d b_0, b_1, b_2, b_3;
+    for (int i = 0; i < kc_act/unroll*unroll; i+=unroll) {
+        //Compute a 4x1 x 1x4 outer-product by loading from A and broadcasting the value of B
+        a_0_col0 = _mm256_load_pd(pan_a);
+        a_1_col0 = _mm256_load_pd(pan_a+4);
+        a_2_col0 = _mm256_load_pd(pan_a+8);
+
+        b_0 = _mm256_broadcast_sd(pan_b);
+        b_1 = _mm256_broadcast_sd(pan_b+1);
+        b_2 = _mm256_broadcast_sd(pan_b+2);
+        b_3 = _mm256_broadcast_sd(pan_b+3);
+
+        c_0_col0 = _mm256_fmadd_pd(a_0_col0, b_0, c_0_col0);
+        c_1_col0 = _mm256_fmadd_pd(a_1_col0, b_0, c_1_col0);
+        c_2_col0 = _mm256_fmadd_pd(a_2_col0, b_0, c_2_col0);
+
+        c_0_col1 = _mm256_fmadd_pd(a_0_col0, b_1, c_0_col1);
+        c_1_col1 = _mm256_fmadd_pd(a_1_col0, b_1, c_1_col1);
+        c_2_col1 = _mm256_fmadd_pd(a_2_col0, b_1, c_2_col1);
+
+        c_0_col2 = _mm256_fmadd_pd(a_0_col0, b_2, c_0_col2);
+        c_1_col2 = _mm256_fmadd_pd(a_1_col0, b_2, c_1_col2);
+        c_2_col2 = _mm256_fmadd_pd(a_2_col0, b_2, c_2_col2);
+
+        c_0_col3 = _mm256_fmadd_pd(a_0_col0, b_3, c_0_col3);
+        c_1_col3 = _mm256_fmadd_pd(a_1_col0, b_3, c_1_col3);
+        c_2_col3 = _mm256_fmadd_pd(a_2_col0, b_3, c_2_col3);
+
+        pan_b += NR;
+        pan_a += MR;
+        /*-------------------------------------------------------------*/
+        a_0_col0 = _mm256_load_pd(pan_a);
+        a_1_col0 = _mm256_load_pd(pan_a+4);
+        a_2_col0 = _mm256_load_pd(pan_a+8);
+
+        b_0 = _mm256_broadcast_sd(pan_b);
+        b_1 = _mm256_broadcast_sd(pan_b+1);
+        b_2 = _mm256_broadcast_sd(pan_b+2);
+        b_3 = _mm256_broadcast_sd(pan_b+3);
+
+        c_0_col0 = _mm256_fmadd_pd(a_0_col0, b_0, c_0_col0);
+        c_1_col0 = _mm256_fmadd_pd(a_1_col0, b_0, c_1_col0);
+        c_2_col0 = _mm256_fmadd_pd(a_2_col0, b_0, c_2_col0);
+
+        c_0_col1 = _mm256_fmadd_pd(a_0_col0, b_1, c_0_col1);
+        c_1_col1 = _mm256_fmadd_pd(a_1_col0, b_1, c_1_col1);
+        c_2_col1 = _mm256_fmadd_pd(a_2_col0, b_1, c_2_col1);
+
+        c_0_col2 = _mm256_fmadd_pd(a_0_col0, b_2, c_0_col2);
+        c_1_col2 = _mm256_fmadd_pd(a_1_col0, b_2, c_1_col2);
+        c_2_col2 = _mm256_fmadd_pd(a_2_col0, b_2, c_2_col2);
+
+        c_0_col3 = _mm256_fmadd_pd(a_0_col0, b_3, c_0_col3);
+        c_1_col3 = _mm256_fmadd_pd(a_1_col0, b_3, c_1_col3);
+        c_2_col3 = _mm256_fmadd_pd(a_2_col0, b_3, c_2_col3);
+
+        pan_b += NR;
+        pan_a += MR;
+    }
+    for (int i = kc_act/unroll*unroll; i < kc_act; i++) {
+        a_0_col0 = _mm256_load_pd(pan_a);
+        a_1_col0 = _mm256_load_pd(pan_a+4);
+        a_2_col0 = _mm256_load_pd(pan_a+8);
+
+        b_0 = _mm256_broadcast_sd(pan_b);
+        b_1 = _mm256_broadcast_sd(pan_b+1);
+        b_2 = _mm256_broadcast_sd(pan_b+2);
+        b_3 = _mm256_broadcast_sd(pan_b+3);
+
+        c_0_col0 = _mm256_fmadd_pd(a_0_col0, b_0, c_0_col0);
+        c_1_col0 = _mm256_fmadd_pd(a_1_col0, b_0, c_1_col0);
+        c_2_col0 = _mm256_fmadd_pd(a_2_col0, b_0, c_2_col0);
+
+        c_0_col1 = _mm256_fmadd_pd(a_0_col0, b_1, c_0_col1);
+        c_1_col1 = _mm256_fmadd_pd(a_1_col0, b_1, c_1_col1);
+        c_2_col1 = _mm256_fmadd_pd(a_2_col0, b_1, c_2_col1);
+
+        c_0_col2 = _mm256_fmadd_pd(a_0_col0, b_2, c_0_col2);
+        c_1_col2 = _mm256_fmadd_pd(a_1_col0, b_2, c_1_col2);
+        c_2_col2 = _mm256_fmadd_pd(a_2_col0, b_2, c_2_col2);
+
+        c_0_col3 = _mm256_fmadd_pd(a_0_col0, b_3, c_0_col3);
+        c_1_col3 = _mm256_fmadd_pd(a_1_col0, b_3, c_1_col3);
+        c_2_col3 = _mm256_fmadd_pd(a_2_col0, b_3, c_2_col3);
+
+        pan_b += NR;
+        pan_a += MR;
+    }
+    //Store first into microtile
+    _mm256_store_pd(micro_tile_c, c_0_col0);
+    _mm256_store_pd(micro_tile_c+4, c_1_col0);
+    _mm256_store_pd(micro_tile_c+8, c_2_col0);
+
+    _mm256_store_pd(micro_tile_c+12, c_0_col1);
+    _mm256_store_pd(micro_tile_c+12+4, c_1_col1);
+    _mm256_store_pd(micro_tile_c+12+8, c_2_col1);
+
+    _mm256_store_pd(micro_tile_c+24, c_0_col2);
+    _mm256_store_pd(micro_tile_c+24+4, c_1_col2);
+    _mm256_store_pd(micro_tile_c+24+8, c_2_col2);    
+
+    _mm256_store_pd(micro_tile_c+36, c_0_col3);
+    _mm256_store_pd(micro_tile_c+36+4, c_1_col3);
+    _mm256_store_pd(micro_tile_c+36+8, c_2_col3);
+    //Unpack microtile into C, keeping actual size of C in mind
+    for (int j = 0; j < nr_act; j++) {
+        for (int i = 0; i < mr_act; i++) {
+            C[i+j*lda] += micro_tile_c[i+j*MR];
+        }
+    }
+}
+
+void block_panel_multiply(const int lda, int kc_act, int mc_act, int nr_act, double* packed_a, double* packed_b, double* C, double* micro_tile_c) {
+    for (int a_pan_ptr = 0; a_pan_ptr < mc_act; a_pan_ptr += MR) {
+        int mr_act = min(MR, mc_act-a_pan_ptr);
+        // memset(micro_tile_c, 0, sizeof(*micro_tile_c));
+        micro_kernel_8x5_no_packing_unrolled(lda, kc_act, mc_act, nr_act, mr_act, packed_a + a_pan_ptr*kc_act, packed_b, C + a_pan_ptr, micro_tile_c);
+    }
+}
+
+void block_multi_panel_multiply(const int lda, int kc_act, int mc_act, double* packed_a, double* packed_b, double* C, double* micro_tile_c) {
     for (int b_pan_ptr = 0; b_pan_ptr < lda; b_pan_ptr+=NR) {
         int nr_act = min(NR, lda-b_pan_ptr);
         block_panel_multiply(lda, kc_act, mc_act, nr_act, packed_a, packed_b + b_pan_ptr*kc_act, C + b_pan_ptr*lda, micro_tile_c);
     }
 }
 
-void outer_proudct(int lda, int kc_act, double* A, double* packed_b, double* C, double* packed_a, double* micro_tile_c) {
+void outer_proudct(const int lda, int kc_act, double* A, double* packed_b, double* C, double* packed_a, double* micro_tile_c) {
     for (int block_ptr = 0; block_ptr < lda; block_ptr+=MC) {
         // pack A
         int mc_act = min(MC, lda - block_ptr);
-        pack_a_default(lda, mc_act, kc_act, A + block_ptr, packed_a);
+        pack_a_8xKC(lda, mc_act, kc_act, A + block_ptr, packed_a);
+        
         block_multi_panel_multiply(lda, kc_act, mc_act, packed_a, packed_b, C + block_ptr,micro_tile_c);
     }
 }
 
-void square_dgemm(int lda, double* A, double* B, double* C) {    
-    double* packed_b = (double*) _mm_malloc((lda+4)*KC *sizeof(double), 64);
-    double* packed_a = (double*) _mm_malloc(MC*KC *sizeof(double), 64);
+void square_dgemm(const int lda, double* A, double* B, double* C) {    
+    MC = 144 - 16 * ((lda > 150) && (lda < 200));
+
+    double* packed_b = (double*) _mm_malloc((lda+NR)*KC *sizeof(double), 64);
     double* micro_tile_c = (double*) _mm_malloc(MR*NR * sizeof(double), 64);
+    double* packed_a = (double*) _mm_malloc(MC*KC *sizeof(double), 64);
 
     for (int j = 0; j < lda; j += KC) {
         int KC_act = min(KC, lda-j);
